@@ -1,0 +1,98 @@
+name: Merge upstream, Create pull request
+
+on:
+  workflow_dispatch:
+  
+env:
+  BRANCH_PREFIX: auto_merge_
+  UPSTREAM_URL: https://github.com/otoyo/astro-notion-blog.git
+  USER_EMAIL: mail@yagi2.dev
+  USER_NAME: yagi2
+  MERGE_COMMAND: git merge upstream/main
+  
+jobs:
+  auto_merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set git config for merge commit
+        run: |
+          git config --global user.email "$USER_EMAIL"
+          git config --global user.name "$USER_NAME"      
+      
+      - name: Get current time as env var
+        env:
+          TZ: 'Asia/Tokyo'
+        run: |
+          T=$(date +'%Y%m%d%H%M%S')
+          echo "CURRENT_TIME=${T}" >> $GITHUB_ENV
+          echo "YEAR=${T:0:4}" >> $GITHUB_ENV
+          echo "MONTH=${T:4:2}" >> $GITHUB_ENV
+          echo "DAY=${T:6:2}" >> $GITHUB_ENV
+          echo "HOUR=${T:8:2}" >> $GITHUB_ENV
+          echo "MIN=${T:10:2}" >> $GITHUB_ENV
+          echo "SEC=${T:12:2}" >> $GITHUB_ENV
+
+      - name: Create branch name as env var
+        run: |
+          BRANCH_SUFFIX="${YEAR}_${MONTH}_${DAY}_${HOUR}_${MIN}_${SEC}"
+          echo "BRANCH=${BRANCH_PREFIX}${BRANCH_SUFFIX}" >> $GITHUB_ENV
+      
+      - name: Create and Checkout new branch
+        run: git checkout -b ${{ env.BRANCH }}
+       
+      - name: Set upstream repo
+        run: git remote add upstream ${UPSTREAM_URL}
+          
+      - name: Fetch upstream repo
+        run: git fetch upstream --unshallow
+      - name: Merge upstream
+        uses: actions/github-script@v6
+        env:
+          COMMAND: ${{ env.MERGE_COMMAND }}
+        with:
+          script: |
+            const { COMMAND } = process.env
+            const result = await exec.getExecOutput(COMMAND, [], {
+              ignoreReturnCode: true,
+            })
+            console.log(result)
+            core.setOutput('EXIT_CODE', result.exitCode)
+            core.setOutput('STDOUT', result.stdout)
+            core.setOutput('STDERR', result.stderr)
+        id: merge
+      
+      - name: Save conflict files list in text file.
+        run: git ls-files --unmerged | cut --fields=2 | sort --unique > ../merge_output.txt
+          
+      - name: Count conflicts as env var
+        run: echo "CONFLICTS_NUM=$(cat ../merge_output.txt | wc --lines)" >> $GITHUB_ENV
+          
+      - name: Create pull request body
+        run: |
+          if [[ $CONFLICTS_NUM == 0 ]]; then
+            echo "# Successfully merged" > ../merge_output.txt
+          else
+            URL_PREFIX=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/tree/${BRANCH}/
+            sed --in-place "s@\(.*\)@- [\1]($URL_PREFIX\1)@g" ../merge_output.txt
+            sed --in-place '1i# Conflict files' ../merge_output.txt            
+          fi
+          
+          echo 'MERGE_OUTPUT=$(cat ../merge_output.txt)' >> $GITHUB_ENV
+      
+      - name: Commit merge with conflict marker
+        if: ${{ env.CONFLICTS_NUM != 0 }}
+        run: git commit -am "Merge upstream with conflict marker"
+      
+      - name: Push and Create pull request
+        if: startsWith(steps.merge.outputs.STDOUT, 'Already up to date.') == false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |          
+          git push origin "$BRANCH"
+
+          PR_BODY="${{ env.MERGE_OUTPUT }}"
+          TIME="${YEAR}/${MONTH}/${DAY} ${HOUR}:${MIN}:${SEC}"
+          PR_TITLE="Auto merge upstream (${TIME})"
+          gh pr create --head ${{ env.BRANCH }} --base $GITHUB_REF_NAME --repo "$GITHUB_REPOSITORY" --title "${PR_TITLE}" --body "${PR_BODY}"
